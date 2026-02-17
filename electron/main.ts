@@ -298,6 +298,11 @@ async function initializeApp() {
 
   app.dock?.hide() // Hide dock icon (optional)
   app.commandLine.appendSwitch("disable-background-timer-throttling")
+
+  // Prevent window from being captured by screen recording software (OBS, etc.)
+  // This disables the IOSurfaceCapturer and DesktopCaptureMacV2 features
+  // Works in conjunction with setContentProtection(true) to prevent screen capture
+  app.commandLine.appendSwitch("disable-features", "IOSurfaceCapturer,DesktopCaptureMacV2")
 }
 
 // Start the application

@@ -2,12 +2,18 @@
 import { BrowserWindow, screen } from "electron"
 import { AppState } from "main"
 import path from "node:path"
+import { exec } from "node:child_process"
 
 const isDev = process.env.NODE_ENV === "development"
 
 const startUrl = isDev
   ? "http://localhost:5180"
   : `file://${path.join(__dirname, "../dist/index.html")}`
+
+// Windows display affinity constants
+const WDA_NONE = 0x00000000
+const WDA_MONITOR = 0x00000001
+const WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
 export class WindowHelper {
   private mainWindow: BrowserWindow | null = null
@@ -23,8 +29,100 @@ export class WindowHelper {
   private currentX: number = 0
   private currentY: number = 0
 
+  // Content protection
+  private contentProtectionInterval: ReturnType<typeof setInterval> | null = null
+  private nativeAffinityApplied: boolean = false
+
   constructor(appState: AppState) {
     this.appState = appState
+  }
+
+  /**
+   * Applies content protection using multiple strategies:
+   * 1. Electron's setContentProtection(true) - uses WDA_EXCLUDEFROMCAPTURE on Win10 2004+
+   * 2. Direct Win32 API call via PowerShell as fallback for when Electron's method fails
+   *    (known to fail after hide/show cycles: https://github.com/electron/electron/issues/29085)
+   */
+  private ensureContentProtection(): void {
+    if (!this.mainWindow || this.mainWindow.isDestroyed()) return
+
+    // Re-apply Electron's built-in content protection
+    this.mainWindow.setContentProtection(true)
+
+    // On Windows, also call the native Win32 API directly as a fallback
+    // This ensures WDA_EXCLUDEFROMCAPTURE is set even when Electron's method silently fails
+    if (process.platform === "win32") {
+      this.applyNativeDisplayAffinity()
+    }
+  }
+
+  /**
+   * Calls SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) directly via PowerShell.
+   * This bypasses Electron's internal state management which can lose the flag after hide/show.
+   * WDA_EXCLUDEFROMCAPTURE (0x11) completely removes the window from all screen capture on Win10 2004+.
+   * See: https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowdisplayaffinity
+   */
+  private applyNativeDisplayAffinity(): void {
+    if (!this.mainWindow || this.mainWindow.isDestroyed()) return
+    if (process.platform !== "win32") return
+
+    try {
+      const hwndBuffer = this.mainWindow.getNativeWindowHandle()
+      // HWND is a pointer-sized value; on Windows (even x64) window handles fit in 32 bits
+      const hwnd = hwndBuffer.readUInt32LE(0)
+
+      // PowerShell script to call SetWindowDisplayAffinity via P/Invoke
+      // Using EncodedCommand to avoid quoting/escaping issues
+      const psScript = [
+        `Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint dwAffinity);' -Name User32 -Namespace Win32`,
+        `[Win32.User32]::SetWindowDisplayAffinity([IntPtr]${hwnd}, ${WDA_EXCLUDEFROMCAPTURE})`
+      ].join("; ")
+
+      const encodedCommand = Buffer.from(psScript, "utf16le").toString("base64")
+
+      exec(
+        `powershell -NoProfile -NonInteractive -EncodedCommand ${encodedCommand}`,
+        { windowsHide: true, timeout: 10000 },
+        (error, stdout) => {
+          if (error) {
+            console.error("Native SetWindowDisplayAffinity failed:", error.message)
+          } else {
+            const result = stdout.trim()
+            if (result === "True") {
+              this.nativeAffinityApplied = true
+              console.log("Native SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) applied successfully")
+            } else {
+              console.warn("Native SetWindowDisplayAffinity returned:", result)
+            }
+          }
+        }
+      )
+    } catch (error) {
+      console.error("Error calling native display affinity:", error)
+    }
+  }
+
+  /**
+   * Starts a periodic interval that re-applies content protection.
+   * This guards against protection being silently lost due to:
+   * - Electron bugs after hide/show cycles
+   * - OS-level resets of window display affinity
+   */
+  private startContentProtectionInterval(): void {
+    if (this.contentProtectionInterval) return
+
+    this.contentProtectionInterval = setInterval(() => {
+      if (this.mainWindow && !this.mainWindow.isDestroyed() && this.isWindowVisible) {
+        this.mainWindow.setContentProtection(true)
+      }
+    }, 3000)
+  }
+
+  private stopContentProtectionInterval(): void {
+    if (this.contentProtectionInterval) {
+      clearInterval(this.contentProtectionInterval)
+      this.contentProtectionInterval = null
+    }
   }
 
   public setWindowDimensions(width: number, height: number): void {
@@ -72,7 +170,6 @@ export class WindowHelper {
     this.screenWidth = workArea.width
     this.screenHeight = workArea.height
 
-    
     const windowSettings: Electron.BrowserWindowConstructorOptions = {
       width: 400,
       height: 600,
@@ -99,7 +196,9 @@ export class WindowHelper {
 
     this.mainWindow = new BrowserWindow(windowSettings)
     // this.mainWindow.webContents.openDevTools()
-    this.mainWindow.setContentProtection(true)
+
+    // Apply content protection immediately after window creation
+    this.ensureContentProtection()
 
     if (process.platform === "darwin") {
       this.mainWindow.setVisibleOnAllWorkspaces(true, {
@@ -115,7 +214,7 @@ export class WindowHelper {
       }
       // Keep window focusable on Linux for proper interaction
       this.mainWindow.setFocusable(true)
-    } 
+    }
     this.mainWindow.setSkipTaskbar(true)
     this.mainWindow.setAlwaysOnTop(true)
 
@@ -131,6 +230,13 @@ export class WindowHelper {
         this.mainWindow.show()
         this.mainWindow.focus()
         this.mainWindow.setAlwaysOnTop(true)
+
+        // Re-apply content protection after first show
+        this.ensureContentProtection()
+
+        // Start periodic re-application of content protection
+        this.startContentProtectionInterval()
+
         console.log("Window is now visible and centered")
       }
     })
@@ -164,7 +270,14 @@ export class WindowHelper {
       }
     })
 
+    // Re-apply content protection whenever the window is shown
+    // This catches ALL show events, including from external code
+    this.mainWindow.on("show", () => {
+      this.ensureContentProtection()
+    })
+
     this.mainWindow.on("closed", () => {
+      this.stopContentProtectionInterval()
       this.mainWindow = null
       this.isWindowVisible = false
       this.windowPosition = null
@@ -210,6 +323,10 @@ export class WindowHelper {
 
     this.mainWindow.showInactive()
 
+    // Critical: re-apply content protection after show
+    // hide() → showInactive() is known to reset WDA_EXCLUDEFROMCAPTURE
+    this.ensureContentProtection()
+
     this.isWindowVisible = true
   }
 
@@ -228,16 +345,16 @@ export class WindowHelper {
 
     const primaryDisplay = screen.getPrimaryDisplay()
     const workArea = primaryDisplay.workAreaSize
-    
+
     // Get current window size or use defaults
     const windowBounds = this.mainWindow.getBounds()
     const windowWidth = windowBounds.width || 400
     const windowHeight = windowBounds.height || 600
-    
+
     // Calculate center position
     const centerX = Math.floor((workArea.width - windowWidth) / 2)
     const centerY = Math.floor((workArea.height - windowHeight) / 2)
-    
+
     // Set window position
     this.mainWindow.setBounds({
       x: centerX,
@@ -245,7 +362,7 @@ export class WindowHelper {
       width: windowWidth,
       height: windowHeight
     })
-    
+
     // Update internal state
     this.windowPosition = { x: centerX, y: centerY }
     this.windowSize = { width: windowWidth, height: windowHeight }
@@ -263,8 +380,12 @@ export class WindowHelper {
     this.mainWindow.show()
     this.mainWindow.focus()
     this.mainWindow.setAlwaysOnTop(true)
+
+    // Re-apply content protection after show
+    this.ensureContentProtection()
+
     this.isWindowVisible = true
-    
+
     console.log(`Window centered and shown`)
   }
 
