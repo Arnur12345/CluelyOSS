@@ -29,11 +29,12 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
   const contentRef = useRef<HTMLDivElement>(null)
 
   const [chatInput, setChatInput] = useState("")
-  const [chatMessages, setChatMessages] = useState<{role: "user"|"gemini", text: string}[]>([])
+  const [chatMessages, setChatMessages] = useState<{role: "user"|"gemini", text: string, image?: string}[]>([])
   const [chatLoading, setChatLoading] = useState(false)
   const [isChatOpen, setIsChatOpen] = useState(false)
   const chatInputRef = useRef<HTMLInputElement>(null)
-  
+  const chatMessagesRef = useRef<HTMLDivElement>(null)
+
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [currentModel, setCurrentModel] = useState<{ provider: string; model: string }>({ provider: "gemini", model: "gemini-3-pro-preview" })
 
@@ -138,7 +139,6 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
     updateDimensions()
 
     const cleanupFunctions = [
-      window.electronAPI.onScreenshotTaken(() => refetch()),
       window.electronAPI.onResetView(() => refetch()),
       window.electronAPI.onSolutionError((error: string) => {
         showToast(
@@ -164,22 +164,32 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
     }
   }, [isTooltipVisible, tooltipHeight])
 
+  // Auto-scroll chat to bottom on new messages
+  useEffect(() => {
+    if (chatMessagesRef.current) {
+      chatMessagesRef.current.scrollTop = chatMessagesRef.current.scrollHeight
+    }
+  }, [chatMessages, chatLoading])
+
   // Seamless screenshot-to-LLM flow
   useEffect(() => {
-    // Listen for screenshot taken event
     const unsubscribe = window.electronAPI.onScreenshotTaken(async (data) => {
       // Refetch screenshots to update the queue
       await refetch();
-      // Show loading in chat
+
+      const screenshotPath = data?.path;
+      const screenshotPreview = data?.preview;
+      if (!screenshotPath) return;
+
+      // Auto-open chat and add screenshot as a user message
+      setIsChatOpen(true);
+      setChatMessages((msgs) => [...msgs, { role: "user", text: "Screenshot", image: screenshotPreview }]);
+
+      // Analyze the screenshot with LLM
       setChatLoading(true);
       try {
-        // Get the latest screenshot path
-        const latest = data?.path || (Array.isArray(data) && data.length > 0 && data[data.length - 1]?.path);
-        if (latest) {
-          // Call the LLM to process the screenshot
-          const response = await window.electronAPI.invoke("analyze-image-file", latest);
-          setChatMessages((msgs) => [...msgs, { role: "gemini", text: response.text }]);
-        }
+        const response = await window.electronAPI.invoke("analyze-image-file", screenshotPath);
+        setChatMessages((msgs) => [...msgs, { role: "gemini", text: response.text }]);
       } catch (err) {
         setChatMessages((msgs) => [...msgs, { role: "gemini", text: "Error: " + String(err) }]);
       } finally {
@@ -258,7 +268,7 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
                 <span className="chat-header-title">Chat</span>
                 <span className="chat-header-model">{currentModel.model}</span>
               </div>
-              <div className="chat-messages">
+              <div className="chat-messages" ref={chatMessagesRef}>
                 {chatMessages.length === 0 ? (
                   <div className="chat-empty">
                     <span>Ready for your questions</span>
@@ -270,7 +280,16 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
                       key={idx}
                       className={`chat-bubble ${msg.role === "user" ? "user" : msg.text.startsWith("🔄") ? "system" : "ai"}`}
                     >
-                      {msg.role === "user" || msg.text.startsWith("🔄") ? (
+                      {msg.image && (
+                        <img
+                          src={msg.image}
+                          alt="Screenshot"
+                          className="chat-screenshot-preview"
+                        />
+                      )}
+                      {msg.role === "user" && !msg.image ? (
+                        msg.text
+                      ) : msg.role === "user" && msg.image ? null : msg.text.startsWith("🔄") ? (
                         msg.text
                       ) : (
                         <MarkdownRenderer content={msg.text} />

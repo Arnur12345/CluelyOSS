@@ -22,7 +22,7 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ onModelChange, onChatOpen
   const [selectedOllamaModel, setSelectedOllamaModel] = useState<string>("");
   const [ollamaUrl, setOllamaUrl] = useState<string>("http://localhost:11434");
   const [availableGeminiModels, setAvailableGeminiModels] = useState<string[]>([]);
-  const [selectedGeminiModel, setSelectedGeminiModel] = useState<string>("gemini-2.0-flash");
+  const [selectedGeminiModel, setSelectedGeminiModel] = useState<string>("gemini-3.1-flash-preview");
 
   useEffect(() => {
     loadCurrentConfig();
@@ -55,7 +55,7 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ onModelChange, onChatOpen
       setAvailableGeminiModels(models);
     } catch (error) {
       console.error('Error loading Gemini models:', error);
-      setAvailableGeminiModels(["gemini-2.0-flash", "gemini-3-flash-preview", "gemini-3-pro-preview"]);
+      setAvailableGeminiModels(["gemini-3.1-flash-preview", "gemini-3-flash-preview", "gemini-3-pro-preview"]);
     }
   };
 
@@ -168,7 +168,7 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ onModelChange, onChatOpen
             >
               {(availableGeminiModels.length > 0
                 ? availableGeminiModels
-                : ["gemini-2.0-flash", "gemini-3-flash-preview", "gemini-3-pro-preview"]
+                : ["gemini-3.1-flash-preview", "gemini-3-flash-preview", "gemini-3-pro-preview"]
               ).map((model) => (
                 <option key={model} value={model}>{model}</option>
               ))}
